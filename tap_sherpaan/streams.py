@@ -6,6 +6,7 @@ from typing import Dict, Any, Iterable, Optional
 from singer_sdk import typing as th
 from tap_sherpaan.client import SherpaStream
 
+import json
 
 class ChangedItemsInformationStream(SherpaStream):
     """Stream for changed items information."""
