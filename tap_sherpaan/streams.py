@@ -434,31 +434,32 @@ class PurchaseInfoStream(SherpaStream):
     schema = th.PropertiesList(
         th.Property("SupplierCode", th.StringType),
         th.Property("PurchaseOrderNumber", th.StringType),
-        th.Property("PurchaseDate", th.StringType),
-        th.Property("PurchaseStatus", th.DateTimeType),
+        th.Property("PurchaseDate", th.DateTimeType),
+        th.Property("PurchaseStatus", th.StringType),
         th.Property("Reference", th.StringType),
         th.Property("WarehouseCode", th.StringType),
         th.Property("PurchaseLines", th.StringType)
     ).to_dict()
 
-    def map_record(self, record: dict) -> dict:
-        """Specifically handle PurchaseLines to prevent key overwriting."""
-        # Check if PurchaseLines exists in the record
-        if "PurchaseLines" in record:
-            lines_data = record["PurchaseLines"]
-            
-            # If the parser didn't already JSON stringify it (because it was single-wrapped),
-            # and it contains the 'PurchaseLine' key, we fix it here.
-            if isinstance(lines_data, dict) and "PurchaseLine" in lines_data:
-                lines = lines_data["PurchaseLine"]
-                # Ensure it's a list even if there's only one line
-                if not isinstance(lines, list):
-                    lines = [lines]
-                
-                # Convert the list of lines to a JSON string to match the schema
-                record["PurchaseLines"] = json.dumps(lines)
-        
-        return super().map_record(record)
+    def _process_nested_objects(self, item: dict) -> dict:
+        """Surgical fix: Capture PurchaseLines before the base class flattens them."""
+        # 1. Manually extract the PurchaseLines from the raw XML dictionary
+        # In the XML, it is nested as item['PurchaseLines']['PurchaseLine']
+        raw_lines_wrapper = item.get("PurchaseLines") or {}
+        raw_lines = raw_lines_wrapper.get("PurchaseLine", [])
+
+        # 2. Handle the "Single Line" vs "Multiple Lines" XML parser variation
+        if isinstance(raw_lines, dict):
+            raw_lines = [raw_lines]
+
+        # 3. Call the base class logic to process all OTHER fields (SupplierCode, etc.)
+        processed = super()._process_nested_objects(item)
+
+        # 4. Inject the clean, non-mangled JSON string into the final record
+        # This prevents the 263 lines from being flattened into 11 overwritten keys.
+        processed["PurchaseLines"] = json.dumps(raw_lines)
+
+        return processed
     
     def _get_soap_envelope(self, token: int = 0, count: int = 200, **kwargs) -> str:
         """Generate SOAP envelope for PurchaseInfo."""
