@@ -440,6 +440,24 @@ class PurchaseInfoStream(SherpaStream):
         th.Property("WarehouseCode", th.StringType),
         th.Property("PurchaseLines", th.StringType)
     ).to_dict()
+
+    def _make_soap_request(self, service_name: str, soap_envelope: str, token: Optional[int] = None) -> dict:
+        """Override request to manually wrap XML tags for consistent parsing."""
+        try:
+            # 1. Get the raw response from the client
+            response = self.client.call_custom_soap_service(service_name, soap_envelope)
+            raw_xml = response["raw_response"]
+
+            # 2. Inject the extra level: <PurchaseLines> -> <PurchaseLines><PurchaseLines>
+            # This mimics the structure that works in ChangedOrdersInformation
+            wrapped_xml = raw_xml.replace("<PurchaseLines>", "<PurchaseLines><PurchaseLines>")
+            wrapped_xml = wrapped_xml.replace("</PurchaseLines>", "</PurchaseLines></PurchaseLines>")
+
+            # 3. Parse the modified XML
+            return self._parse_soap_response(wrapped_xml, service_name)
+        except Exception as e:
+            self.logger.error(f"[{self.name}] Error in wrapped SOAP request: {str(e)}")
+            raise
     
     def _get_soap_envelope(self, token: int = 0, count: int = 200, **kwargs) -> str:
         """Generate SOAP envelope for PurchaseInfo."""
@@ -452,31 +470,6 @@ class PurchaseInfoStream(SherpaStream):
     </tns:PurchaseInfo>
   </soap12:Body>
 </soap12:Envelope>"""
-
-    def map_record(self, record: Dict[str, Any]) -> Dict[str, Any]:
-        """Normalize PurchaseLine(s) to PurchaseLines JSON array, matching OrderLines behaviour.
-
-        The API returns PurchaseLines.PurchaseLine (singular key with list). The base client
-        flattens that to top-level key \"PurchaseLine\". We rename to \"PurchaseLines\" and
-        ensure the value is always a JSON array (xmltodict returns a single dict when there
-        is only one PurchaseLine).
-        Only keys defined in the stream schema are kept (drops API-only fields like
-        Token, ExternalOrdernumber, etc.).
-        """
-        if "PurchaseLine" in record:
-            raw = record.pop("PurchaseLine")
-            try:
-                parsed = json.loads(raw) if isinstance(raw, str) else raw
-            except (json.JSONDecodeError, TypeError):
-                parsed = []
-            if isinstance(parsed, dict):
-                parsed = [parsed]
-            elif not isinstance(parsed, list):
-                parsed = []
-            record["PurchaseLines"] = json.dumps(parsed)
-        else:
-            record["PurchaseLines"] = record.get("PurchaseLines", "[]")
-        return record
     
     def get_records(self, context: Optional[dict] = None) -> Iterable[dict]:
         """Get purchase info using the purchase_number from parent context."""
