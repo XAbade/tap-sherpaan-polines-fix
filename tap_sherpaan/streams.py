@@ -440,42 +440,6 @@ class PurchaseInfoStream(SherpaStream):
         th.Property("WarehouseCode", th.StringType),
         th.Property("PurchaseLines", th.StringType)
     ).to_dict()
-
-    def _process_nested_objects(self, item: dict) -> dict:
-        """Surgical fix to capture lines from both 'PurchaseLines' or 'PurchaseLine' keys."""
-        
-        # 1. Try to find the lines in all common XML-to-dict variations
-        # Variation A: {'PurchaseLines': {'PurchaseLine': [...]}}
-        # Variation B: {'PurchaseLines': [...]}
-        # Variation C: {'PurchaseLine': [...]}
-        raw_data = item.get("PurchaseLines") or item.get("PurchaseLine") or []
-        
-        if isinstance(raw_data, dict):
-            # Handle the case where it's wrapped in a 'PurchaseLine' key
-            lines = raw_data.get("PurchaseLine", raw_data)
-        else:
-            lines = raw_data
-
-        # 2. Ensure the result is always a list (even if only 1 line exists)
-        if isinstance(lines, dict):
-            lines = [lines]
-        elif not isinstance(lines, list):
-            lines = []
-
-        # 3. Call the base class logic to process standard fields (SupplierCode, etc.)
-        processed = super()._process_nested_objects(item)
-
-        # 4. Final safety check: Clean XML artifacts from the lines before stringifying
-        # This uses the helper function from your base SherpaStream class
-        def clean_list(obj):
-            if isinstance(obj, list):
-                return [self._process_nested_objects(i) if isinstance(i, dict) else i for i in obj]
-            return obj
-
-        # 5. Overwrite the final field with the preserved JSON string
-        processed["PurchaseLines"] = json.dumps(lines)
-
-        return processed
     
     def _get_soap_envelope(self, token: int = 0, count: int = 200, **kwargs) -> str:
         """Generate SOAP envelope for PurchaseInfo."""
@@ -489,6 +453,31 @@ class PurchaseInfoStream(SherpaStream):
   </soap12:Body>
 </soap12:Envelope>"""
 
+    def map_record(self, record: Dict[str, Any]) -> Dict[str, Any]:
+        """Normalize PurchaseLine(s) to PurchaseLines JSON array, matching OrderLines behaviour.
+
+        The API returns PurchaseLines.PurchaseLine (singular key with list). The base client
+        flattens that to top-level key \"PurchaseLine\". We rename to \"PurchaseLines\" and
+        ensure the value is always a JSON array (xmltodict returns a single dict when there
+        is only one PurchaseLine).
+        Only keys defined in the stream schema are kept (drops API-only fields like
+        Token, ExternalOrdernumber, etc.).
+        """
+        if "PurchaseLine" in record:
+            raw = record.pop("PurchaseLine")
+            try:
+                parsed = json.loads(raw) if isinstance(raw, str) else raw
+            except (json.JSONDecodeError, TypeError):
+                parsed = []
+            if isinstance(parsed, dict):
+                parsed = [parsed]
+            elif not isinstance(parsed, list):
+                parsed = []
+            record["PurchaseLines"] = json.dumps(parsed)
+        else:
+            record["PurchaseLines"] = record.get("PurchaseLines", "[]")
+        return record
+    
     def get_records(self, context: Optional[dict] = None) -> Iterable[dict]:
         """Get purchase info using the purchase_number from parent context."""
         self._current_purchase_number = context["purchase_number"]
