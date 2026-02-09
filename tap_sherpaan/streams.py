@@ -437,9 +437,28 @@ class PurchaseInfoStream(SherpaStream):
         th.Property("PurchaseStatus", th.DateTimeType),
         th.Property("Reference", th.StringType),
         th.Property("WarehouseCode", th.StringType),
-        th.Property("PurchaseLine", th.StringType)
+        th.Property("PurchaseLines", th.StringType)
     ).to_dict()
 
+    def map_record(self, record: dict) -> dict:
+        """Specifically handle PurchaseLines to prevent key overwriting."""
+        # Check if PurchaseLines exists in the record
+        if "PurchaseLines" in record:
+            lines_data = record["PurchaseLines"]
+            
+            # If the parser didn't already JSON stringify it (because it was single-wrapped),
+            # and it contains the 'PurchaseLine' key, we fix it here.
+            if isinstance(lines_data, dict) and "PurchaseLine" in lines_data:
+                lines = lines_data["PurchaseLine"]
+                # Ensure it's a list even if there's only one line
+                if not isinstance(lines, list):
+                    lines = [lines]
+                
+                # Convert the list of lines to a JSON string to match the schema
+                record["PurchaseLines"] = json.dumps(lines)
+        
+        return super().map_record(record)
+    
     def _get_soap_envelope(self, token: int = 0, count: int = 200, **kwargs) -> str:
         """Generate SOAP envelope for PurchaseInfo."""
         return f"""<?xml version="1.0" encoding="utf-8"?>
