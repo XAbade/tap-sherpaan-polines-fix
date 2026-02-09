@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 import html
+import json
 from typing import Dict, Any, Iterable, Optional
 from singer_sdk import typing as th
 from tap_sherpaan.client import SherpaStream
 
-import json
 
 class ChangedItemsInformationStream(SherpaStream):
     """Stream for changed items information."""
@@ -441,24 +441,6 @@ class PurchaseInfoStream(SherpaStream):
         th.Property("PurchaseLines", th.StringType)
     ).to_dict()
 
-    def _make_soap_request(self, service_name: str, soap_envelope: str, token: Optional[int] = None) -> dict:
-        """Override request to manually wrap XML tags for consistent parsing."""
-        try:
-            # 1. Get the raw response from the client
-            response = self.client.call_custom_soap_service(service_name, soap_envelope)
-            raw_xml = response["raw_response"]
-
-            # 2. Inject the extra level: <PurchaseLines> -> <PurchaseLines><PurchaseLines>
-            # This mimics the structure that works in ChangedOrdersInformation
-            wrapped_xml = raw_xml.replace("<PurchaseLines>", "<PurchaseLines><PurchaseLines>")
-            wrapped_xml = wrapped_xml.replace("</PurchaseLines>", "</PurchaseLines></PurchaseLines>")
-
-            # 3. Parse the modified XML
-            return self._parse_soap_response(wrapped_xml, service_name)
-        except Exception as e:
-            self.logger.error(f"[{self.name}] Error in wrapped SOAP request: {str(e)}")
-            raise
-    
     def _get_soap_envelope(self, token: int = 0, count: int = 200, **kwargs) -> str:
         """Generate SOAP envelope for PurchaseInfo."""
         return f"""<?xml version="1.0" encoding="utf-8"?>
@@ -470,7 +452,7 @@ class PurchaseInfoStream(SherpaStream):
     </tns:PurchaseInfo>
   </soap12:Body>
 </soap12:Envelope>"""
-    
+
     def get_records(self, context: Optional[dict] = None) -> Iterable[dict]:
         """Get purchase info using the purchase_number from parent context."""
         self._current_purchase_number = context["purchase_number"]
@@ -482,6 +464,54 @@ class PurchaseInfoStream(SherpaStream):
             context=context,
             page_size=page_size,
         )
+
+    def map_record(self, item: Dict[str, Any]) -> Dict[str, Any]:
+        """Normalize to PurchaseLines and ensure single-line case is a list.
+
+        When there is only one <PurchaseLine>, the base flattener turns it into
+        PurchaseLine_SupplierItemCode, PurchaseLine_ItemCode, etc., so "PurchaseLines"
+        is missing and the CSV column is empty. When there are multiple lines they
+        are JSON-encoded as a list. We always set "PurchaseLines" to a JSON array
+        of line objects (reconstructing from flattened keys when there was one line).
+        """
+        record = super().map_record(item)
+        # Case 1: value already set (multiple lines from API) under PurchaseLine or PurchaseLines
+        raw = record.get("PurchaseLines") or record.get("PurchaseLine")
+        if raw is not None:
+            if isinstance(raw, str):
+                try:
+                    parsed = json.loads(raw)
+                except (json.JSONDecodeError, TypeError):
+                    record["PurchaseLines"] = raw
+                    return record
+            else:
+                parsed = raw
+            if isinstance(parsed, list):
+                record["PurchaseLines"] = json.dumps(parsed)
+                return record
+            if isinstance(parsed, dict):
+                for key in ("PurchaseLine", "PurchaseLines"):
+                    if key in parsed:
+                        line_data = parsed[key]
+                        lines = line_data if isinstance(line_data, list) else [line_data]
+                        record["PurchaseLines"] = json.dumps(lines)
+                        return record
+                for k, v in parsed.items():
+                    if "PurchaseLine" in k:
+                        lines = v if isinstance(v, list) else [v]
+                        record["PurchaseLines"] = json.dumps(lines)
+                        return record
+            record["PurchaseLines"] = json.dumps(parsed)
+            return record
+        # Case 2: Single line was flattened to PurchaseLine_* keys; reconstruct one line
+        prefix = "PurchaseLine_"
+        line_keys = [k for k in record if k.startswith(prefix)]
+        if line_keys:
+            single_line = {}
+            for k in line_keys:
+                single_line[k[len(prefix) :]] = record[k]
+            record["PurchaseLines"] = json.dumps([single_line])
+        return record
 
 
 class ChangedStockByWarehouseGroupCodeStream(SherpaStream):
