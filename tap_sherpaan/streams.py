@@ -442,22 +442,38 @@ class PurchaseInfoStream(SherpaStream):
     ).to_dict()
 
     def _process_nested_objects(self, item: dict) -> dict:
-        """Surgical fix: Capture PurchaseLines before the base class flattens them."""
-        # 1. Manually extract the PurchaseLines from the raw XML dictionary
-        # In the XML, it is nested as item['PurchaseLines']['PurchaseLine']
-        raw_lines_wrapper = item.get("PurchaseLines") or {}
-        raw_lines = raw_lines_wrapper.get("PurchaseLine", [])
+        """Surgical fix to capture lines from both 'PurchaseLines' or 'PurchaseLine' keys."""
+        
+        # 1. Try to find the lines in all common XML-to-dict variations
+        # Variation A: {'PurchaseLines': {'PurchaseLine': [...]}}
+        # Variation B: {'PurchaseLines': [...]}
+        # Variation C: {'PurchaseLine': [...]}
+        raw_data = item.get("PurchaseLines") or item.get("PurchaseLine") or []
+        
+        if isinstance(raw_data, dict):
+            # Handle the case where it's wrapped in a 'PurchaseLine' key
+            lines = raw_data.get("PurchaseLine", raw_data)
+        else:
+            lines = raw_data
 
-        # 2. Handle the "Single Line" vs "Multiple Lines" XML parser variation
-        if isinstance(raw_lines, dict):
-            raw_lines = [raw_lines]
+        # 2. Ensure the result is always a list (even if only 1 line exists)
+        if isinstance(lines, dict):
+            lines = [lines]
+        elif not isinstance(lines, list):
+            lines = []
 
-        # 3. Call the base class logic to process all OTHER fields (SupplierCode, etc.)
+        # 3. Call the base class logic to process standard fields (SupplierCode, etc.)
         processed = super()._process_nested_objects(item)
 
-        # 4. Inject the clean, non-mangled JSON string into the final record
-        # This prevents the 263 lines from being flattened into 11 overwritten keys.
-        processed["PurchaseLines"] = json.dumps(raw_lines)
+        # 4. Final safety check: Clean XML artifacts from the lines before stringifying
+        # This uses the helper function from your base SherpaStream class
+        def clean_list(obj):
+            if isinstance(obj, list):
+                return [self._process_nested_objects(i) if isinstance(i, dict) else i for i in obj]
+            return obj
+
+        # 5. Overwrite the final field with the preserved JSON string
+        processed["PurchaseLines"] = json.dumps(lines)
 
         return processed
     
